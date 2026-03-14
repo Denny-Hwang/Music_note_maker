@@ -43,8 +43,17 @@ _init_state()
 # ──────────────────────────────────────────────
 # 유틸리티 함수
 # ──────────────────────────────────────────────
-def download_video(url: str, output_dir: str) -> str:
+def download_video(url: str, output_dir: str, cookies_path: str | None = None) -> str:
     """yt-dlp로 720p 이하 mp4 다운로드, 파일 경로 반환."""
+    import subprocess
+    import sys
+
+    # yt-dlp를 최신 버전으로 업데이트 (403 방지)
+    subprocess.run(
+        [sys.executable, "-m", "pip", "install", "-U", "yt-dlp"],
+        capture_output=True,
+    )
+
     import yt_dlp
 
     outtmpl = os.path.join(output_dir, "video.%(ext)s")
@@ -53,9 +62,41 @@ def download_video(url: str, output_dir: str) -> str:
         "outtmpl": outtmpl,
         "quiet": True,
         "no_warnings": True,
+        # 403 Forbidden 방지 옵션
+        "http_headers": {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Safari/537.36"
+            ),
+            "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+        },
+        "extractor_args": {"youtube": {"player_client": ["web"]}},
+        "socket_timeout": 30,
+        "retries": 3,
     }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download([url])
+
+    # 쿠키 파일이 제공된 경우 사용
+    if cookies_path:
+        ydl_opts["cookiefile"] = cookies_path
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+    else:
+        # 브라우저 쿠키 자동 사용 시도 (로그인 필요 영상 대응)
+        downloaded = False
+        for browser in ("chrome", "firefox", "edge", "safari"):
+            try:
+                ydl_opts_with_cookies = {**ydl_opts, "cookiesfrombrowser": (browser,)}
+                with yt_dlp.YoutubeDL(ydl_opts_with_cookies) as ydl:
+                    ydl.download([url])
+                downloaded = True
+                break
+            except Exception:
+                continue
+        if not downloaded:
+            # 쿠키 없이 재시도
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
 
     # 다운로드된 파일 찾기
     for f in os.listdir(output_dir):
@@ -296,6 +337,15 @@ hash_threshold = st.sidebar.slider(
     "중복 제거 임계값 (해밍 거리)", min_value=1, max_value=25, value=10, step=1
 )
 
+st.sidebar.markdown("---")
+st.sidebar.subheader("쿠키 설정 (선택)")
+st.sidebar.caption(
+    "403 오류 발생 시, 브라우저에서 쿠키를 내보내 업로드하세요. "
+    "[Get cookies.txt LOCALLY](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc) "
+    "확장 프로그램 사용을 권장합니다."
+)
+cookies_file = st.sidebar.file_uploader("cookies.txt 업로드", type=["txt"])
+
 extract_btn = st.sidebar.button("🎼 악보 추출 시작", use_container_width=True)
 
 # ──────────────────────────────────────────────
@@ -313,12 +363,27 @@ if extract_btn:
         try:
             # 1) 다운로드
             with st.status("영상 다운로드 중...", expanded=True) as status:
-                st.write("yt-dlp로 영상을 다운로드하고 있습니다...")
+                st.write("yt-dlp를 최신 버전으로 업데이트하고 영상을 다운로드합니다...")
+                # 쿠키 파일 처리
+                cookie_path = None
+                if cookies_file is not None:
+                    cookie_path = os.path.join(tmp_dir, "cookies.txt")
+                    with open(cookie_path, "wb") as cf:
+                        cf.write(cookies_file.getvalue())
                 try:
-                    video_path = download_video(youtube_url, tmp_dir)
+                    video_path = download_video(youtube_url, tmp_dir, cookie_path)
                     st.write("✅ 다운로드 완료!")
                 except Exception as e:
-                    st.error(f"다운로드 실패: {e}")
+                    err_msg = str(e)
+                    st.error(f"다운로드 실패: {err_msg}")
+                    if "403" in err_msg or "Forbidden" in err_msg:
+                        st.warning(
+                            "**YouTube 403 오류 해결 방법:**\n"
+                            "1. 사이드바에서 `cookies.txt` 파일을 업로드해주세요.\n"
+                            "2. Chrome 확장 프로그램 'Get cookies.txt LOCALLY'로 "
+                            "YouTube 쿠키를 내보낼 수 있습니다.\n"
+                            "3. YouTube에 로그인된 상태에서 쿠키를 내보내면 더 잘 작동합니다."
+                        )
                     status.update(label="다운로드 실패", state="error")
                     st.stop()
 
