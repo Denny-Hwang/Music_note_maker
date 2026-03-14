@@ -49,8 +49,7 @@ def download_video(url: str, output_dir: str) -> str:
 
     outtmpl = os.path.join(output_dir, "video.%(ext)s")
     ydl_opts = {
-        "format": "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[height<=720]",
-        "merge_output_format": "mp4",
+        "format": "best[height<=720][ext=mp4]/best[ext=mp4]/best[height<=720]/best",
         "outtmpl": outtmpl,
         "quiet": True,
         "no_warnings": True,
@@ -60,7 +59,7 @@ def download_video(url: str, output_dir: str) -> str:
 
     # 다운로드된 파일 찾기
     for f in os.listdir(output_dir):
-        if f.startswith("video") and f.endswith(".mp4"):
+        if f.startswith("video"):
             return os.path.join(output_dir, f)
     raise FileNotFoundError("다운로드된 영상 파일을 찾을 수 없습니다.")
 
