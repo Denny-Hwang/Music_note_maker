@@ -43,158 +43,151 @@ _init_state()
 # ──────────────────────────────────────────────
 # 유틸리티 함수
 # ──────────────────────────────────────────────
-def _ensure_ytdlp_latest():
-    """yt-dlp 최신 안정 버전 설치."""
+def _install_ffmpeg():
+    """ffmpeg가 없으면 pip으로 ffmpeg-python 대신 static binary를 설치."""
+    import shutil
     import subprocess
     import sys
 
+    if shutil.which("ffmpeg"):
+        return True
+
+    # imageio-ffmpeg에 포함된 ffmpeg static binary 활용
+    subprocess.run(
+        [sys.executable, "-m", "pip", "install", "-q", "imageio-ffmpeg"],
+        capture_output=True,
+    )
+    try:
+        import imageio_ffmpeg
+        ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+        # yt-dlp가 찾을 수 있도록 PATH에 추가
+        ffmpeg_dir = os.path.dirname(ffmpeg_path)
+        os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
+        return True
+    except Exception:
+        return False
+
+
+def _run_ytdlp(url: str, output_dir: str, cookies_path: str | None = None,
+               extra_args: list[str] | None = None) -> str | None:
+    """yt-dlp를 subprocess로 실행. 성공 시 파일 경로 반환, 실패 시 None."""
+    import subprocess
+    import sys
+
+    outtmpl = os.path.join(output_dir, "video.%(ext)s")
+    cmd = [
+        sys.executable, "-m", "yt_dlp",
+        "--format", "bestvideo[height<=720]+bestaudio/best[height<=720]/bestvideo+bestaudio/best",
+        "--output", outtmpl,
+        "--no-playlist",
+        "--retries", "3",
+        "--socket-timeout", "30",
+    ]
+
+    if cookies_path:
+        cmd.extend(["--cookies", cookies_path])
+
+    if extra_args:
+        cmd.extend(extra_args)
+
+    cmd.append(url)
+
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+
+    if result.returncode == 0:
+        for f in os.listdir(output_dir):
+            if f.startswith("video"):
+                return os.path.join(output_dir, f)
+
+    # 파일이 부분적으로 생성되었을 수 있으므로 정리
+    for f in os.listdir(output_dir):
+        if f.startswith("video"):
+            os.remove(os.path.join(output_dir, f))
+
+    return None
+
+
+def download_video(url: str, output_dir: str, cookies_path: str | None = None,
+                   status_callback=None) -> str:
+    """영상 다운로드. 여러 전략을 순차적으로 시도."""
+    import subprocess
+    import sys
+
+    def log(msg):
+        if status_callback:
+            status_callback(msg)
+
+    # 1단계: yt-dlp 최신 버전 + ffmpeg 설치
+    log("yt-dlp 업데이트 중...")
     subprocess.run(
         [sys.executable, "-m", "pip", "install", "-U", "yt-dlp"],
         capture_output=True,
     )
 
+    log("ffmpeg 확인 중...")
+    _install_ffmpeg()
 
-def _download_with_pytubefix(url: str, output_dir: str, cookies_path: str | None = None) -> str:
-    """pytubefix 폴백 다운로드."""
-    import subprocess
-    import sys
+    # 2단계: yt-dlp 시도 (다양한 player_client 조합)
+    client_combos = [
+        ["--extractor-args", "youtube:player_client=mweb"],
+        ["--extractor-args", "youtube:player_client=ios"],
+        ["--extractor-args", "youtube:player_client=web_creator"],
+        ["--extractor-args", "youtube:player_client=tv"],
+        [],  # 기본값
+    ]
 
+    for i, extra in enumerate(client_combos):
+        client_name = extra[1].split("=")[1] if extra else "default"
+        log(f"yt-dlp 시도 {i + 1}/{len(client_combos)} (client: {client_name})...")
+
+        result = _run_ytdlp(url, output_dir, cookies_path, extra)
+        if result:
+            return result
+
+    # 3단계: pytubefix 폴백
+    log("pytubefix로 폴백 시도 중...")
     subprocess.run(
         [sys.executable, "-m", "pip", "install", "-U", "pytubefix"],
         capture_output=True,
     )
 
-    from pytubefix import YouTube as PyTube
-
-    kwargs = {}
-    if cookies_path:
-        kwargs["use_oauth"] = False
-        kwargs["allow_oauth_cache"] = False
-
-    yt = PyTube(url, **kwargs)
-
-    # 쿠키 파일이 있으면 pytubefix 세션에 적용
-    if cookies_path:
-        import http.cookiejar
-        cj = http.cookiejar.MozillaCookieJar(cookies_path)
-        try:
-            cj.load(ignore_discard=True, ignore_expires=True)
-            for cookie in cj:
-                yt._monostate.http.cookies.set(cookie.name, cookie.value, domain=cookie.domain)
-        except Exception:
-            pass
-
-    stream = (
-        yt.streams.filter(progressive=True, file_extension="mp4")
-        .order_by("resolution")
-        .desc()
-        .first()
-    )
-    if stream is None:
-        stream = yt.streams.filter(file_extension="mp4").first()
-    if stream is None:
-        stream = yt.streams.first()
-    if stream is None:
-        raise RuntimeError("pytubefix: 다운로드 가능한 스트림을 찾을 수 없습니다.")
-
-    out_path = stream.download(output_path=output_dir, filename="video.mp4")
-    return out_path
-
-
-def _has_ffmpeg() -> bool:
-    """ffmpeg 설치 여부 확인."""
-    import shutil
-    return shutil.which("ffmpeg") is not None
-
-
-def download_video(url: str, output_dir: str, cookies_path: str | None = None) -> str:
-    """영상 다운로드. yt-dlp → yt-dlp(쿠키) → pytubefix 순으로 시도."""
-    errors = []
-
-    # ffmpeg 있으면 분리 스트림(고화질), 없으면 프리머지 스트림만
-    if _has_ffmpeg():
-        fmt = "bestvideo[height<=720]+bestaudio/best[height<=720]/best"
-    else:
-        fmt = "best[height<=720]/best"
-
-    # ── 방법 1: yt-dlp ──
     try:
-        _ensure_ytdlp_latest()
-        import importlib
-        import yt_dlp
-        importlib.reload(yt_dlp)
+        from pytubefix import YouTube as PyTube
 
-        outtmpl = os.path.join(output_dir, "video.%(ext)s")
-        ydl_opts = {
-            "format": fmt,
-            "outtmpl": outtmpl,
-            "quiet": True,
-            "no_warnings": True,
-            "http_headers": {
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/131.0.0.0 Safari/537.36"
-                ),
-                "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
-            },
-            "extractor_args": {"youtube": {"player_client": ["mweb", "ios", "web"]}},
-            "socket_timeout": 30,
-            "retries": 3,
-        }
+        yt = PyTube(url)
 
+        # 쿠키 적용
         if cookies_path:
-            ydl_opts["cookiefile"] = cookies_path
-
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
-
-        for f in os.listdir(output_dir):
-            if f.startswith("video"):
-                return os.path.join(output_dir, f)
-    except Exception as e:
-        errors.append(f"yt-dlp: {e}")
-        # 다운로드 실패 시 기존 파일 정리
-        for f in os.listdir(output_dir):
-            if f.startswith("video"):
-                os.remove(os.path.join(output_dir, f))
-
-    # ── 방법 2: yt-dlp + 브라우저 쿠키 ──
-    if not cookies_path:
-        import yt_dlp
-
-        for browser in ("chrome", "firefox", "edge", "safari"):
             try:
-                outtmpl = os.path.join(output_dir, "video.%(ext)s")
-                ydl_opts = {
-                    "format": fmt,
-                    "outtmpl": outtmpl,
-                    "quiet": True,
-                    "no_warnings": True,
-                    "cookiesfrombrowser": (browser,),
-                    "extractor_args": {"youtube": {"player_client": ["mweb", "ios", "web"]}},
-                    "socket_timeout": 30,
-                    "retries": 3,
-                }
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    ydl.download([url])
-                for f in os.listdir(output_dir):
-                    if f.startswith("video"):
-                        return os.path.join(output_dir, f)
+                import http.cookiejar
+                cj = http.cookiejar.MozillaCookieJar(cookies_path)
+                cj.load(ignore_discard=True, ignore_expires=True)
+                for cookie in cj:
+                    yt._monostate.http.cookies.set(
+                        cookie.name, cookie.value, domain=cookie.domain
+                    )
             except Exception:
-                for f in os.listdir(output_dir):
-                    if f.startswith("video"):
-                        os.remove(os.path.join(output_dir, f))
-                continue
+                pass
 
-    # ── 방법 3: pytubefix 폴백 ──
-    try:
-        return _download_with_pytubefix(url, output_dir, cookies_path)
+        stream = (
+            yt.streams.filter(progressive=True, file_extension="mp4")
+            .order_by("resolution").desc().first()
+        )
+        if not stream:
+            stream = yt.streams.filter(progressive=True).first()
+        if not stream:
+            stream = yt.streams.first()
+        if stream:
+            return stream.download(output_path=output_dir, filename="video.mp4")
     except Exception as e:
-        errors.append(f"pytubefix: {e}")
+        log(f"pytubefix 실패: {e}")
 
     raise RuntimeError(
-        "모든 다운로드 방법이 실패했습니다.\n" + "\n".join(errors)
+        "모든 다운로드 방법이 실패했습니다.\n\n"
+        "해결 방법:\n"
+        "1. yt-dlp를 터미널에서 직접 업데이트: pip install -U yt-dlp\n"
+        "2. 사이드바에서 cookies.txt 업로드\n"
+        "3. 터미널에서 확인: yt-dlp --list-formats <URL>"
     )
 
 
@@ -456,7 +449,11 @@ if extract_btn:
         try:
             # 1) 다운로드
             with st.status("영상 다운로드 중...", expanded=True) as status:
-                st.write("yt-dlp nightly 설치 → 다운로드 시도 → 실패 시 pytubefix 폴백...")
+                status_placeholder = st.empty()
+
+                def on_status(msg):
+                    status_placeholder.write(msg)
+
                 # 쿠키 파일 처리
                 cookie_path = None
                 if cookies_file is not None:
@@ -464,7 +461,10 @@ if extract_btn:
                     with open(cookie_path, "wb") as cf:
                         cf.write(cookies_file.getvalue())
                 try:
-                    video_path = download_video(youtube_url, tmp_dir, cookie_path)
+                    video_path = download_video(
+                        youtube_url, tmp_dir, cookie_path,
+                        status_callback=on_status,
+                    )
                     st.write("✅ 다운로드 완료!")
                 except Exception as e:
                     err_msg = str(e)
