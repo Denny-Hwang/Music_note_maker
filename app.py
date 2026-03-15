@@ -44,26 +44,17 @@ _init_state()
 # 유틸리티 함수
 # ──────────────────────────────────────────────
 def _ensure_ytdlp_latest():
-    """yt-dlp nightly 빌드 설치 (YouTube 403 방지 핵심)."""
+    """yt-dlp 최신 안정 버전 설치."""
     import subprocess
     import sys
 
-    # nightly 빌드 설치 시도 → 실패 시 stable 업데이트
-    result = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "-U",
-         "yt-dlp @ https://github.com/yt-dlp/yt-dlp/releases/download/nightly/yt-dlp-2025.3.15.232854.dev0.tar.gz"],
+    subprocess.run(
+        [sys.executable, "-m", "pip", "install", "-U", "yt-dlp"],
         capture_output=True,
     )
-    if result.returncode != 0:
-        # nightly URL이 변경되었을 수 있으므로 pip 패키지로 폴백
-        subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-U",
-             "yt-dlp @ https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest/download/yt-dlp.tar.gz"],
-            capture_output=True,
-        )
 
 
-def _download_with_pytubefix(url: str, output_dir: str) -> str:
+def _download_with_pytubefix(url: str, output_dir: str, cookies_path: str | None = None) -> str:
     """pytubefix 폴백 다운로드."""
     import subprocess
     import sys
@@ -75,7 +66,24 @@ def _download_with_pytubefix(url: str, output_dir: str) -> str:
 
     from pytubefix import YouTube as PyTube
 
-    yt = PyTube(url)
+    kwargs = {}
+    if cookies_path:
+        kwargs["use_oauth"] = False
+        kwargs["allow_oauth_cache"] = False
+
+    yt = PyTube(url, **kwargs)
+
+    # 쿠키 파일이 있으면 pytubefix 세션에 적용
+    if cookies_path:
+        import http.cookiejar
+        cj = http.cookiejar.MozillaCookieJar(cookies_path)
+        try:
+            cj.load(ignore_discard=True, ignore_expires=True)
+            for cookie in cj:
+                yt._monostate.http.cookies.set(cookie.name, cookie.value, domain=cookie.domain)
+        except Exception:
+            pass
+
     stream = (
         yt.streams.filter(progressive=True, file_extension="mp4")
         .order_by("resolution")
@@ -85,26 +93,40 @@ def _download_with_pytubefix(url: str, output_dir: str) -> str:
     if stream is None:
         stream = yt.streams.filter(file_extension="mp4").first()
     if stream is None:
+        stream = yt.streams.first()
+    if stream is None:
         raise RuntimeError("pytubefix: 다운로드 가능한 스트림을 찾을 수 없습니다.")
 
     out_path = stream.download(output_path=output_dir, filename="video.mp4")
     return out_path
 
 
+def _has_ffmpeg() -> bool:
+    """ffmpeg 설치 여부 확인."""
+    import shutil
+    return shutil.which("ffmpeg") is not None
+
+
 def download_video(url: str, output_dir: str, cookies_path: str | None = None) -> str:
-    """영상 다운로드. yt-dlp(nightly) → yt-dlp(쿠키) → pytubefix 순으로 시도."""
+    """영상 다운로드. yt-dlp → yt-dlp(쿠키) → pytubefix 순으로 시도."""
     errors = []
 
-    # ── 방법 1: yt-dlp nightly ──
+    # ffmpeg 있으면 분리 스트림(고화질), 없으면 프리머지 스트림만
+    if _has_ffmpeg():
+        fmt = "bestvideo[height<=720]+bestaudio/best[height<=720]/best"
+    else:
+        fmt = "best[height<=720]/best"
+
+    # ── 방법 1: yt-dlp ──
     try:
         _ensure_ytdlp_latest()
         import importlib
         import yt_dlp
-        importlib.reload(yt_dlp)  # 업데이트된 버전 반영
+        importlib.reload(yt_dlp)
 
         outtmpl = os.path.join(output_dir, "video.%(ext)s")
         ydl_opts = {
-            "format": "best[height<=720][ext=mp4]/best[ext=mp4]/best[height<=720]/best",
+            "format": fmt,
             "outtmpl": outtmpl,
             "quiet": True,
             "no_warnings": True,
@@ -145,7 +167,7 @@ def download_video(url: str, output_dir: str, cookies_path: str | None = None) -
             try:
                 outtmpl = os.path.join(output_dir, "video.%(ext)s")
                 ydl_opts = {
-                    "format": "best[height<=720][ext=mp4]/best[ext=mp4]/best[height<=720]/best",
+                    "format": fmt,
                     "outtmpl": outtmpl,
                     "quiet": True,
                     "no_warnings": True,
@@ -167,7 +189,7 @@ def download_video(url: str, output_dir: str, cookies_path: str | None = None) -
 
     # ── 방법 3: pytubefix 폴백 ──
     try:
-        return _download_with_pytubefix(url, output_dir)
+        return _download_with_pytubefix(url, output_dir, cookies_path)
     except Exception as e:
         errors.append(f"pytubefix: {e}")
 
