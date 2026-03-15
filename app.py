@@ -365,13 +365,13 @@ if st.session_state.extracted_frames:
     # 인터랙티브 슬라이더 (범위 슬라이더로 즉시 반영)
     crop_h_range = st.slider(
         "좌우 크롭 범위 (%)",
-        min_value=0, max_value=100, value=(0, 100),
+        min_value=0.0, max_value=100.0, value=(0.0, 100.0), step=0.1,
         key="crop_h_slider",
         help="왼쪽/오른쪽 크롭 경계를 드래그로 조정",
     )
     crop_v_range = st.slider(
         "상하 크롭 범위 (%)",
-        min_value=0, max_value=100, value=(0, 100),
+        min_value=0.0, max_value=100.0, value=(0.0, 100.0), step=0.1,
         key="crop_v_slider",
         help="위/아래 크롭 경계를 드래그로 조정",
     )
@@ -385,13 +385,13 @@ if st.session_state.extracted_frames:
     with st.expander("숫자로 미세 조정"):
         col_crop1, col_crop2, col_crop3, col_crop4 = st.columns(4)
         with col_crop1:
-            crop_top = st.number_input("위 (%)", 0, 49, crop_top, key="crop_top")
+            crop_top = st.number_input("위 (%)", 0.0, 49.0, float(crop_top), step=0.1, format="%.1f", key="crop_top")
         with col_crop2:
-            crop_bottom = st.number_input("아래 (%)", 0, 49, crop_bottom, key="crop_bottom")
+            crop_bottom = st.number_input("아래 (%)", 0.0, 49.0, float(crop_bottom), step=0.1, format="%.1f", key="crop_bottom")
         with col_crop3:
-            crop_left = st.number_input("왼쪽 (%)", 0, 49, crop_left, key="crop_left")
+            crop_left = st.number_input("왼쪽 (%)", 0.0, 49.0, float(crop_left), step=0.1, format="%.1f", key="crop_left")
         with col_crop4:
-            crop_right = st.number_input("오른쪽 (%)", 0, 49, crop_right, key="crop_right")
+            crop_right = st.number_input("오른쪽 (%)", 0.0, 49.0, float(crop_right), step=0.1, format="%.1f", key="crop_right")
 
     has_crop = any([crop_top, crop_bottom, crop_left, crop_right])
 
