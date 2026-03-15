@@ -569,7 +569,6 @@ if st.session_state.extracted_frames:
                         st.session_state.applied_crop, st.session_state.individual_crops,
                     )
                     st.session_state["_png_data"] = create_png_zip(imgs)
-                st.rerun()
             if st.session_state.get("_png_data"):
                 st.download_button(
                     "⬇️ PNG ZIP 다운로드",
@@ -590,7 +589,6 @@ if st.session_state.extracted_frames:
                         st.session_state.applied_crop, st.session_state.individual_crops,
                     )
                     st.session_state["_auto_pdf_data"] = create_auto_layout_pdf(imgs, margin_mm, spacing_mm)
-                st.rerun()
             if st.session_state.get("_auto_pdf_data"):
                 st.download_button(
                     "⬇️ 자동 배치 PDF 다운로드",
@@ -609,7 +607,6 @@ if st.session_state.extracted_frames:
                         st.session_state.applied_crop, st.session_state.individual_crops,
                     )
                     st.session_state["_ind_pdf_data"] = create_individual_pdf(imgs)
-                st.rerun()
             if st.session_state.get("_ind_pdf_data"):
                 st.download_button(
                     "⬇️ 개별 PDF 다운로드",
