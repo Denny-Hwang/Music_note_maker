@@ -31,6 +31,8 @@ def _init_state():
         "timestamps": [],
         "selected": [],
         "individual_crops": {},
+        "applied_crop": None,       # 전체 적용된 크롭 값
+        "show_preview": False,       # 최종 미리보기 표시 여부
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -120,7 +122,7 @@ def remove_duplicates(
     return unique
 
 
-def apply_crop(img: Image.Image, top: int, bottom: int, left: int, right: int) -> Image.Image:
+def apply_crop(img: Image.Image, top: float, bottom: float, left: float, right: float) -> Image.Image:
     """퍼센트 기반 크롭 적용."""
     w, h = img.size
     x1 = int(w * left / 100)
@@ -132,7 +134,7 @@ def apply_crop(img: Image.Image, top: int, bottom: int, left: int, right: int) -
     return img.crop((x1, y1, x2, y2))
 
 
-def create_crop_preview(img: Image.Image, top: int, bottom: int, left: int, right: int) -> Image.Image:
+def create_crop_preview(img: Image.Image, top: float, bottom: float, left: float, right: float) -> Image.Image:
     """크롭 미리보기: 반투명 오버레이 + 빨간 테두리."""
     preview = img.copy().convert("RGBA")
     overlay = Image.new("RGBA", preview.size, (0, 0, 0, 0))
@@ -254,6 +256,22 @@ def create_individual_pdf(images: list[Image.Image]) -> bytes:
     return buf.getvalue()
 
 
+def get_cropped_images(frames, selected, applied_crop, individual_crops):
+    """선택된 프레임에 크롭을 적용한 이미지 리스트 반환."""
+    images = []
+    for i, img in enumerate(frames):
+        if not selected[i]:
+            continue
+        ind_crop = individual_crops.get(i)
+        if ind_crop:
+            images.append(apply_crop(img, **ind_crop))
+        elif applied_crop:
+            images.append(apply_crop(img, **applied_crop))
+        else:
+            images.append(img)
+    return images
+
+
 # ──────────────────────────────────────────────
 # 사이드바
 # ──────────────────────────────────────────────
@@ -347,6 +365,8 @@ if extract_btn:
             st.session_state.timestamps = timestamps
             st.session_state.selected = [True] * len(pil_frames)
             st.session_state.individual_crops = {}
+            st.session_state.applied_crop = None
+            st.session_state.show_preview = False
 
         finally:
             import shutil
@@ -362,6 +382,7 @@ if st.session_state.extracted_frames:
 
     # ── 전체 크롭 설정 ──
     st.markdown("### ✂️ 전체 크롭 설정")
+    st.caption("첫 번째 이미지를 기준으로 크롭 영역을 설정한 뒤, '전체 적용' 버튼을 눌러주세요.")
 
     crop_mode = st.radio(
         "크롭 방식 선택",
@@ -375,19 +396,24 @@ if st.session_state.extracted_frames:
 
     if crop_mode == "이미지에서 드래그":
         st.markdown("**첫 번째 이미지에서 크롭 영역을 드래그하세요**")
-        box = st_cropper(
+        cropped_result = st_cropper(
             ref_img,
             realtime_update=True,
             box_color="#FF0000",
             aspect_ratio=None,
-            return_type="box",
+            return_type="both",
             key="image_cropper",
         )
-        # box: {"left": int, "top": int, "width": int, "height": int}
-        crop_left = box["left"] / img_w * 100
-        crop_top = box["top"] / img_h * 100
-        crop_right = max(0, 100 - (box["left"] + box["width"]) / img_w * 100)
-        crop_bottom = max(0, 100 - (box["top"] + box["height"]) / img_h * 100)
+        # return_type="both" → (cropped_image, box_dict)
+        if isinstance(cropped_result, tuple):
+            _, box = cropped_result
+        else:
+            box = {"left": 0, "top": 0, "width": img_w, "height": img_h}
+
+        crop_left = max(0.0, box["left"] / img_w * 100)
+        crop_top = max(0.0, box["top"] / img_h * 100)
+        crop_right = max(0.0, 100 - (box["left"] + box["width"]) / img_w * 100)
+        crop_bottom = max(0.0, 100 - (box["top"] + box["height"]) / img_h * 100)
         st.caption(f"위: {crop_top:.1f}% | 아래: {crop_bottom:.1f}% | 왼쪽: {crop_left:.1f}% | 오른쪽: {crop_right:.1f}%")
 
     elif crop_mode == "슬라이더":
@@ -395,20 +421,18 @@ if st.session_state.extracted_frames:
             "좌우 크롭 범위 (%)",
             min_value=0.0, max_value=100.0, value=(0.0, 100.0), step=0.1,
             key="crop_h_slider",
-            help="왼쪽/오른쪽 크롭 경계를 드래그로 조정",
         )
         crop_v_range = st.slider(
             "상하 크롭 범위 (%)",
             min_value=0.0, max_value=100.0, value=(0.0, 100.0), step=0.1,
             key="crop_v_slider",
-            help="위/아래 크롭 경계를 드래그로 조정",
         )
         crop_left = crop_h_range[0]
         crop_right = 100 - crop_h_range[1]
         crop_top = crop_v_range[0]
         crop_bottom = 100 - crop_v_range[1]
 
-        st.markdown("**크롭 미리보기** (첫 번째 이미지 기준)")
+        st.markdown("**크롭 미리보기**")
         preview = create_crop_preview(ref_img, crop_top, crop_bottom, crop_left, crop_right)
         st.image(preview, width="stretch")
 
@@ -423,11 +447,34 @@ if st.session_state.extracted_frames:
         with col_crop4:
             crop_right = st.number_input("오른쪽 (%)", 0.0, 49.0, 0.0, step=0.1, format="%.1f", key="crop_right")
 
-        st.markdown("**크롭 미리보기** (첫 번째 이미지 기준)")
+        st.markdown("**크롭 미리보기**")
         preview = create_crop_preview(ref_img, crop_top, crop_bottom, crop_left, crop_right)
         st.image(preview, width="stretch")
 
-    has_crop = any([crop_top, crop_bottom, crop_left, crop_right])
+    # 전체 적용 버튼
+    col_apply1, col_apply2 = st.columns(2)
+    with col_apply1:
+        if st.button("✅ 전체 적용", width="stretch", type="primary"):
+            pending = {"top": crop_top, "bottom": crop_bottom, "left": crop_left, "right": crop_right}
+            if any(v > 0 for v in pending.values()):
+                st.session_state.applied_crop = pending
+            else:
+                st.session_state.applied_crop = None
+            st.session_state.show_preview = False
+            st.rerun()
+    with col_apply2:
+        if st.button("🔄 크롭 초기화", width="stretch"):
+            st.session_state.applied_crop = None
+            st.session_state.individual_crops = {}
+            st.session_state.show_preview = False
+            st.rerun()
+
+    # 현재 적용된 크롭 상태 표시
+    ac = st.session_state.applied_crop
+    if ac:
+        st.success(f"적용된 크롭 — 위: {ac['top']:.1f}% | 아래: {ac['bottom']:.1f}% | 왼쪽: {ac['left']:.1f}% | 오른쪽: {ac['right']:.1f}%")
+    else:
+        st.info("크롭 미적용 (원본)")
 
     # ── 프레임 선택 ──
     st.markdown("### 📋 프레임 선택")
@@ -441,7 +488,7 @@ if st.session_state.extracted_frames:
             st.session_state.selected = [False] * len(frames)
             st.rerun()
 
-    # ── 3열 그리드 표시 ──
+    # ── 3열 그리드 표시 (적용된 크롭 기준) ──
     cols_per_row = 3
     for row_start in range(0, len(frames), cols_per_row):
         cols = st.columns(cols_per_row)
@@ -450,14 +497,12 @@ if st.session_state.extracted_frames:
             if i >= len(frames):
                 break
             with cols[col_idx]:
-                # 개별 크롭 가져오기
+                # 개별 크롭 > 전체 적용 크롭 > 원본
                 ind_crop = st.session_state.individual_crops.get(i)
                 if ind_crop:
                     display_img = apply_crop(frames[i], **ind_crop)
-                elif has_crop:
-                    display_img = apply_crop(
-                        frames[i], crop_top, crop_bottom, crop_left, crop_right
-                    )
+                elif st.session_state.applied_crop:
+                    display_img = apply_crop(frames[i], **st.session_state.applied_crop)
                 else:
                     display_img = frames[i]
 
@@ -474,10 +519,10 @@ if st.session_state.extracted_frames:
                         value=i in st.session_state.individual_crops,
                     )
                     if use_individual:
-                        ind_top = st.number_input("위 (%)", 0, 49, 0, key=f"ind_top_{i}")
-                        ind_bottom = st.number_input("아래 (%)", 0, 49, 0, key=f"ind_bot_{i}")
-                        ind_left = st.number_input("왼쪽 (%)", 0, 49, 0, key=f"ind_left_{i}")
-                        ind_right = st.number_input("오른쪽 (%)", 0, 49, 0, key=f"ind_right_{i}")
+                        ind_top = st.number_input("위 (%)", 0.0, 49.0, 0.0, step=0.1, format="%.1f", key=f"ind_top_{i}")
+                        ind_bottom = st.number_input("아래 (%)", 0.0, 49.0, 0.0, step=0.1, format="%.1f", key=f"ind_bot_{i}")
+                        ind_left = st.number_input("왼쪽 (%)", 0.0, 49.0, 0.0, step=0.1, format="%.1f", key=f"ind_left_{i}")
+                        ind_right = st.number_input("오른쪽 (%)", 0.0, 49.0, 0.0, step=0.1, format="%.1f", key=f"ind_right_{i}")
                         st.session_state.individual_crops[i] = {
                             "top": ind_top,
                             "bottom": ind_bottom,
@@ -491,65 +536,85 @@ if st.session_state.extracted_frames:
     st.markdown("---")
     st.subheader("📤 내보내기")
 
-    # 선택된 이미지에 크롭 적용
-    selected_images = []
-    for i, img in enumerate(frames):
-        if not st.session_state.selected[i]:
-            continue
-        ind_crop = st.session_state.individual_crops.get(i)
-        if ind_crop:
-            selected_images.append(apply_crop(img, **ind_crop))
-        elif has_crop:
-            selected_images.append(
-                apply_crop(img, crop_top, crop_bottom, crop_left, crop_right)
-            )
-        else:
-            selected_images.append(img)
-
-    if not selected_images:
+    selected_count = sum(st.session_state.selected)
+    if selected_count == 0:
         st.warning("내보낼 프레임을 선택해주세요.")
     else:
-        st.info(f"선택된 프레임: {len(selected_images)}개")
+        st.info(f"선택된 프레임: {selected_count}개")
 
+        # 최종 미리보기 (버튼으로 토글)
+        if st.button("👀 최종 미리보기 보기/숨기기", width="stretch"):
+            st.session_state.show_preview = not st.session_state.show_preview
+            st.rerun()
+
+        if st.session_state.show_preview:
+            st.markdown("#### 최종 미리보기")
+            preview_images = get_cropped_images(
+                frames, st.session_state.selected,
+                st.session_state.applied_crop, st.session_state.individual_crops,
+            )
+            for i, img in enumerate(preview_images):
+                st.image(img, caption=f"score_{i + 1:03d}", width="stretch")
+
+        # 내보내기 버튼들
+        st.markdown("---")
         export_cols = st.columns(3)
 
         with export_cols[0]:
             st.markdown("**PNG ZIP**")
-            png_data = create_png_zip(selected_images)
-            st.download_button(
-                "📦 PNG ZIP 다운로드",
-                data=png_data,
-                file_name="score_images.zip",
-                mime="application/zip",
-                width="stretch",
-            )
+            if st.button("📦 PNG ZIP 생성", width="stretch", key="gen_png"):
+                with st.spinner("PNG ZIP 생성 중..."):
+                    imgs = get_cropped_images(
+                        frames, st.session_state.selected,
+                        st.session_state.applied_crop, st.session_state.individual_crops,
+                    )
+                    st.session_state["_png_data"] = create_png_zip(imgs)
+                st.rerun()
+            if st.session_state.get("_png_data"):
+                st.download_button(
+                    "⬇️ PNG ZIP 다운로드",
+                    data=st.session_state["_png_data"],
+                    file_name="score_images.zip",
+                    mime="application/zip",
+                    width="stretch",
+                )
 
         with export_cols[1]:
             st.markdown("**A4 PDF (자동 배치)**")
             margin_mm = st.number_input("여백 (mm)", 5, 30, 10, key="pdf_margin")
             spacing_mm = st.number_input("이미지 간격 (mm)", 0, 20, 5, key="pdf_spacing")
-            pdf_data = create_auto_layout_pdf(selected_images, margin_mm, spacing_mm)
-            st.download_button(
-                "📄 자동 배치 PDF 다운로드",
-                data=pdf_data,
-                file_name="score_auto_layout.pdf",
-                mime="application/pdf",
-                width="stretch",
-            )
+            if st.button("📄 자동 배치 PDF 생성", width="stretch", key="gen_auto_pdf"):
+                with st.spinner("PDF 생성 중..."):
+                    imgs = get_cropped_images(
+                        frames, st.session_state.selected,
+                        st.session_state.applied_crop, st.session_state.individual_crops,
+                    )
+                    st.session_state["_auto_pdf_data"] = create_auto_layout_pdf(imgs, margin_mm, spacing_mm)
+                st.rerun()
+            if st.session_state.get("_auto_pdf_data"):
+                st.download_button(
+                    "⬇️ 자동 배치 PDF 다운로드",
+                    data=st.session_state["_auto_pdf_data"],
+                    file_name="score_auto_layout.pdf",
+                    mime="application/pdf",
+                    width="stretch",
+                )
 
         with export_cols[2]:
             st.markdown("**개별 PDF**")
-            ind_pdf_data = create_individual_pdf(selected_images)
-            st.download_button(
-                "📄 개별 PDF 다운로드",
-                data=ind_pdf_data,
-                file_name="score_individual.pdf",
-                mime="application/pdf",
-                width="stretch",
-            )
-
-        # 최종 미리보기
-        st.markdown("---")
-        st.subheader("👀 최종 미리보기")
-        for i, img in enumerate(selected_images):
-            st.image(img, caption=f"score_{i + 1:03d}", width="stretch")
+            if st.button("📄 개별 PDF 생성", width="stretch", key="gen_ind_pdf"):
+                with st.spinner("PDF 생성 중..."):
+                    imgs = get_cropped_images(
+                        frames, st.session_state.selected,
+                        st.session_state.applied_crop, st.session_state.individual_crops,
+                    )
+                    st.session_state["_ind_pdf_data"] = create_individual_pdf(imgs)
+                st.rerun()
+            if st.session_state.get("_ind_pdf_data"):
+                st.download_button(
+                    "⬇️ 개별 PDF 다운로드",
+                    data=st.session_state["_ind_pdf_data"],
+                    file_name="score_individual.pdf",
+                    mime="application/pdf",
+                    width="stretch",
+                )
