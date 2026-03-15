@@ -1,5 +1,6 @@
 streamlit>=1.28.0
-yt-dlp>=2023.10.0
+yt-dlp>=2024.1.0
+pytubefix>=6.0.0
 opencv-python-headless>=4.8.0
 Pillow>=10.0.0
 imagehash>=4.3.0
