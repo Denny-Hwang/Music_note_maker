@@ -14,6 +14,7 @@ import numpy as np
 import streamlit as st
 from fpdf import FPDF
 from PIL import Image, ImageDraw
+from streamlit_cropper import st_cropper
 
 # ──────────────────────────────────────────────
 # 페이지 설정
@@ -362,43 +363,71 @@ if st.session_state.extracted_frames:
     # ── 전체 크롭 설정 ──
     st.markdown("### ✂️ 전체 크롭 설정")
 
-    # 인터랙티브 슬라이더 (범위 슬라이더로 즉시 반영)
-    crop_h_range = st.slider(
-        "좌우 크롭 범위 (%)",
-        min_value=0.0, max_value=100.0, value=(0.0, 100.0), step=0.1,
-        key="crop_h_slider",
-        help="왼쪽/오른쪽 크롭 경계를 드래그로 조정",
-    )
-    crop_v_range = st.slider(
-        "상하 크롭 범위 (%)",
-        min_value=0.0, max_value=100.0, value=(0.0, 100.0), step=0.1,
-        key="crop_v_slider",
-        help="위/아래 크롭 경계를 드래그로 조정",
+    crop_mode = st.radio(
+        "크롭 방식 선택",
+        ["이미지에서 드래그", "슬라이더", "숫자 입력"],
+        horizontal=True,
+        key="crop_mode",
     )
 
-    crop_left = crop_h_range[0]
-    crop_right = 100 - crop_h_range[1]
-    crop_top = crop_v_range[0]
-    crop_bottom = 100 - crop_v_range[1]
+    ref_img = frames[0]
+    img_w, img_h = ref_img.size
 
-    # 숫자 입력으로도 미세 조정 가능
-    with st.expander("숫자로 미세 조정"):
+    if crop_mode == "이미지에서 드래그":
+        st.markdown("**첫 번째 이미지에서 크롭 영역을 드래그하세요**")
+        box = st_cropper(
+            ref_img,
+            realtime_update=True,
+            box_color="#FF0000",
+            aspect_ratio=None,
+            return_type="box",
+            key="image_cropper",
+        )
+        # box: {"left": int, "top": int, "width": int, "height": int}
+        crop_left = box["left"] / img_w * 100
+        crop_top = box["top"] / img_h * 100
+        crop_right = max(0, 100 - (box["left"] + box["width"]) / img_w * 100)
+        crop_bottom = max(0, 100 - (box["top"] + box["height"]) / img_h * 100)
+        st.caption(f"위: {crop_top:.1f}% | 아래: {crop_bottom:.1f}% | 왼쪽: {crop_left:.1f}% | 오른쪽: {crop_right:.1f}%")
+
+    elif crop_mode == "슬라이더":
+        crop_h_range = st.slider(
+            "좌우 크롭 범위 (%)",
+            min_value=0.0, max_value=100.0, value=(0.0, 100.0), step=0.1,
+            key="crop_h_slider",
+            help="왼쪽/오른쪽 크롭 경계를 드래그로 조정",
+        )
+        crop_v_range = st.slider(
+            "상하 크롭 범위 (%)",
+            min_value=0.0, max_value=100.0, value=(0.0, 100.0), step=0.1,
+            key="crop_v_slider",
+            help="위/아래 크롭 경계를 드래그로 조정",
+        )
+        crop_left = crop_h_range[0]
+        crop_right = 100 - crop_h_range[1]
+        crop_top = crop_v_range[0]
+        crop_bottom = 100 - crop_v_range[1]
+
+        st.markdown("**크롭 미리보기** (첫 번째 이미지 기준)")
+        preview = create_crop_preview(ref_img, crop_top, crop_bottom, crop_left, crop_right)
+        st.image(preview, width="stretch")
+
+    else:  # 숫자 입력
         col_crop1, col_crop2, col_crop3, col_crop4 = st.columns(4)
         with col_crop1:
-            crop_top = st.number_input("위 (%)", 0.0, 49.0, float(crop_top), step=0.1, format="%.1f", key="crop_top")
+            crop_top = st.number_input("위 (%)", 0.0, 49.0, 0.0, step=0.1, format="%.1f", key="crop_top")
         with col_crop2:
-            crop_bottom = st.number_input("아래 (%)", 0.0, 49.0, float(crop_bottom), step=0.1, format="%.1f", key="crop_bottom")
+            crop_bottom = st.number_input("아래 (%)", 0.0, 49.0, 0.0, step=0.1, format="%.1f", key="crop_bottom")
         with col_crop3:
-            crop_left = st.number_input("왼쪽 (%)", 0.0, 49.0, float(crop_left), step=0.1, format="%.1f", key="crop_left")
+            crop_left = st.number_input("왼쪽 (%)", 0.0, 49.0, 0.0, step=0.1, format="%.1f", key="crop_left")
         with col_crop4:
-            crop_right = st.number_input("오른쪽 (%)", 0.0, 49.0, float(crop_right), step=0.1, format="%.1f", key="crop_right")
+            crop_right = st.number_input("오른쪽 (%)", 0.0, 49.0, 0.0, step=0.1, format="%.1f", key="crop_right")
+
+        st.markdown("**크롭 미리보기** (첫 번째 이미지 기준)")
+        preview = create_crop_preview(ref_img, crop_top, crop_bottom, crop_left, crop_right)
+        st.image(preview, width="stretch")
 
     has_crop = any([crop_top, crop_bottom, crop_left, crop_right])
-
-    # 크롭 미리보기 (항상 표시)
-    st.markdown("**크롭 미리보기** (첫 번째 이미지 기준)")
-    preview = create_crop_preview(frames[0], crop_top, crop_bottom, crop_left, crop_right)
-    st.image(preview, width="stretch")
 
     # ── 프레임 선택 ──
     st.markdown("### 📋 프레임 선택")
