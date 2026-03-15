@@ -43,25 +43,137 @@ _init_state()
 # ──────────────────────────────────────────────
 # 유틸리티 함수
 # ──────────────────────────────────────────────
-def download_video(url: str, output_dir: str) -> str:
-    """yt-dlp로 720p 이하 mp4 다운로드, 파일 경로 반환."""
-    import yt_dlp
+def _ensure_ytdlp_latest():
+    """yt-dlp nightly 빌드 설치 (YouTube 403 방지 핵심)."""
+    import subprocess
+    import sys
 
-    outtmpl = os.path.join(output_dir, "video.%(ext)s")
-    ydl_opts = {
-        "format": "best[height<=720][ext=mp4]/best[ext=mp4]/best[height<=720]/best",
-        "outtmpl": outtmpl,
-        "quiet": True,
-        "no_warnings": True,
-    }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download([url])
+    # nightly 빌드 설치 시도 → 실패 시 stable 업데이트
+    result = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "-U",
+         "yt-dlp @ https://github.com/yt-dlp/yt-dlp/releases/download/nightly/yt-dlp-2025.3.15.232854.dev0.tar.gz"],
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        # nightly URL이 변경되었을 수 있으므로 pip 패키지로 폴백
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-U",
+             "yt-dlp @ https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest/download/yt-dlp.tar.gz"],
+            capture_output=True,
+        )
 
-    # 다운로드된 파일 찾기
-    for f in os.listdir(output_dir):
-        if f.startswith("video"):
-            return os.path.join(output_dir, f)
-    raise FileNotFoundError("다운로드된 영상 파일을 찾을 수 없습니다.")
+
+def _download_with_pytubefix(url: str, output_dir: str) -> str:
+    """pytubefix 폴백 다운로드."""
+    import subprocess
+    import sys
+
+    subprocess.run(
+        [sys.executable, "-m", "pip", "install", "-U", "pytubefix"],
+        capture_output=True,
+    )
+
+    from pytubefix import YouTube as PyTube
+
+    yt = PyTube(url)
+    stream = (
+        yt.streams.filter(progressive=True, file_extension="mp4")
+        .order_by("resolution")
+        .desc()
+        .first()
+    )
+    if stream is None:
+        stream = yt.streams.filter(file_extension="mp4").first()
+    if stream is None:
+        raise RuntimeError("pytubefix: 다운로드 가능한 스트림을 찾을 수 없습니다.")
+
+    out_path = stream.download(output_path=output_dir, filename="video.mp4")
+    return out_path
+
+
+def download_video(url: str, output_dir: str, cookies_path: str | None = None) -> str:
+    """영상 다운로드. yt-dlp(nightly) → yt-dlp(쿠키) → pytubefix 순으로 시도."""
+    errors = []
+
+    # ── 방법 1: yt-dlp nightly ──
+    try:
+        _ensure_ytdlp_latest()
+        import importlib
+        import yt_dlp
+        importlib.reload(yt_dlp)  # 업데이트된 버전 반영
+
+        outtmpl = os.path.join(output_dir, "video.%(ext)s")
+        ydl_opts = {
+            "format": "best[height<=720][ext=mp4]/best[ext=mp4]/best[height<=720]/best",
+            "outtmpl": outtmpl,
+            "quiet": True,
+            "no_warnings": True,
+            "http_headers": {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/131.0.0.0 Safari/537.36"
+                ),
+                "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+            },
+            "extractor_args": {"youtube": {"player_client": ["mweb", "ios", "web"]}},
+            "socket_timeout": 30,
+            "retries": 3,
+        }
+
+        if cookies_path:
+            ydl_opts["cookiefile"] = cookies_path
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+
+        for f in os.listdir(output_dir):
+            if f.startswith("video"):
+                return os.path.join(output_dir, f)
+    except Exception as e:
+        errors.append(f"yt-dlp: {e}")
+        # 다운로드 실패 시 기존 파일 정리
+        for f in os.listdir(output_dir):
+            if f.startswith("video"):
+                os.remove(os.path.join(output_dir, f))
+
+    # ── 방법 2: yt-dlp + 브라우저 쿠키 ──
+    if not cookies_path:
+        import yt_dlp
+
+        for browser in ("chrome", "firefox", "edge", "safari"):
+            try:
+                outtmpl = os.path.join(output_dir, "video.%(ext)s")
+                ydl_opts = {
+                    "format": "best[height<=720][ext=mp4]/best[ext=mp4]/best[height<=720]/best",
+                    "outtmpl": outtmpl,
+                    "quiet": True,
+                    "no_warnings": True,
+                    "cookiesfrombrowser": (browser,),
+                    "extractor_args": {"youtube": {"player_client": ["mweb", "ios", "web"]}},
+                    "socket_timeout": 30,
+                    "retries": 3,
+                }
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.download([url])
+                for f in os.listdir(output_dir):
+                    if f.startswith("video"):
+                        return os.path.join(output_dir, f)
+            except Exception:
+                for f in os.listdir(output_dir):
+                    if f.startswith("video"):
+                        os.remove(os.path.join(output_dir, f))
+                continue
+
+    # ── 방법 3: pytubefix 폴백 ──
+    try:
+        return _download_with_pytubefix(url, output_dir)
+    except Exception as e:
+        errors.append(f"pytubefix: {e}")
+
+    raise RuntimeError(
+        "모든 다운로드 방법이 실패했습니다.\n" + "\n".join(errors)
+    )
 
 
 def extract_frames(video_path: str, interval: float) -> list[tuple[np.ndarray, float]]:
@@ -296,6 +408,15 @@ hash_threshold = st.sidebar.slider(
     "중복 제거 임계값 (해밍 거리)", min_value=1, max_value=25, value=10, step=1
 )
 
+st.sidebar.markdown("---")
+st.sidebar.subheader("쿠키 설정 (선택)")
+st.sidebar.caption(
+    "403 오류 발생 시, 브라우저에서 쿠키를 내보내 업로드하세요. "
+    "[Get cookies.txt LOCALLY](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc) "
+    "확장 프로그램 사용을 권장합니다."
+)
+cookies_file = st.sidebar.file_uploader("cookies.txt 업로드", type=["txt"])
+
 extract_btn = st.sidebar.button("🎼 악보 추출 시작", use_container_width=True)
 
 # ──────────────────────────────────────────────
@@ -313,12 +434,27 @@ if extract_btn:
         try:
             # 1) 다운로드
             with st.status("영상 다운로드 중...", expanded=True) as status:
-                st.write("yt-dlp로 영상을 다운로드하고 있습니다...")
+                st.write("yt-dlp nightly 설치 → 다운로드 시도 → 실패 시 pytubefix 폴백...")
+                # 쿠키 파일 처리
+                cookie_path = None
+                if cookies_file is not None:
+                    cookie_path = os.path.join(tmp_dir, "cookies.txt")
+                    with open(cookie_path, "wb") as cf:
+                        cf.write(cookies_file.getvalue())
                 try:
-                    video_path = download_video(youtube_url, tmp_dir)
+                    video_path = download_video(youtube_url, tmp_dir, cookie_path)
                     st.write("✅ 다운로드 완료!")
                 except Exception as e:
-                    st.error(f"다운로드 실패: {e}")
+                    err_msg = str(e)
+                    st.error(f"다운로드 실패: {err_msg}")
+                    if "403" in err_msg or "Forbidden" in err_msg:
+                        st.warning(
+                            "**YouTube 403 오류 해결 방법:**\n"
+                            "1. 사이드바에서 `cookies.txt` 파일을 업로드해주세요.\n"
+                            "2. Chrome 확장 프로그램 'Get cookies.txt LOCALLY'로 "
+                            "YouTube 쿠키를 내보낼 수 있습니다.\n"
+                            "3. YouTube에 로그인된 상태에서 쿠키를 내보내면 더 잘 작동합니다."
+                        )
                     status.update(label="다운로드 실패", state="error")
                     st.stop()
 
