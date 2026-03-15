@@ -1,11 +1,10 @@
 """
-YouTube 합창 악보 추출기 - Streamlit 웹앱
-YouTube 합창 악보 영상에서 악보 프레임 자동 추출 → 중복 제거 → 인터랙티브 크롭 → A4 PDF/PNG 내보내기
+합창 악보 추출기 - Streamlit 웹앱
+악보 영상 업로드 → 악보 프레임 자동 추출 → 중복 제거 → 인터랙티브 크롭 → A4 PDF/PNG 내보내기
 """
 
 import io
 import os
-import shutil
 import tempfile
 import zipfile
 
@@ -43,154 +42,6 @@ _init_state()
 # ──────────────────────────────────────────────
 # 유틸리티 함수
 # ──────────────────────────────────────────────
-def _install_ffmpeg():
-    """ffmpeg가 없으면 pip으로 ffmpeg-python 대신 static binary를 설치."""
-    import shutil
-    import subprocess
-    import sys
-
-    if shutil.which("ffmpeg"):
-        return True
-
-    # imageio-ffmpeg에 포함된 ffmpeg static binary 활용
-    subprocess.run(
-        [sys.executable, "-m", "pip", "install", "-q", "imageio-ffmpeg"],
-        capture_output=True,
-    )
-    try:
-        import imageio_ffmpeg
-        ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
-        # yt-dlp가 찾을 수 있도록 PATH에 추가
-        ffmpeg_dir = os.path.dirname(ffmpeg_path)
-        os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
-        return True
-    except Exception:
-        return False
-
-
-def _run_ytdlp(url: str, output_dir: str, cookies_path: str | None = None,
-               extra_args: list[str] | None = None) -> str | None:
-    """yt-dlp를 subprocess로 실행. 성공 시 파일 경로 반환, 실패 시 None."""
-    import subprocess
-    import sys
-
-    outtmpl = os.path.join(output_dir, "video.%(ext)s")
-    cmd = [
-        sys.executable, "-m", "yt_dlp",
-        "--format", "bestvideo[height<=720]+bestaudio/best[height<=720]/bestvideo+bestaudio/best",
-        "--output", outtmpl,
-        "--no-playlist",
-        "--retries", "3",
-        "--socket-timeout", "30",
-    ]
-
-    if cookies_path:
-        cmd.extend(["--cookies", cookies_path])
-
-    if extra_args:
-        cmd.extend(extra_args)
-
-    cmd.append(url)
-
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-
-    if result.returncode == 0:
-        for f in os.listdir(output_dir):
-            if f.startswith("video"):
-                return os.path.join(output_dir, f)
-
-    # 파일이 부분적으로 생성되었을 수 있으므로 정리
-    for f in os.listdir(output_dir):
-        if f.startswith("video"):
-            os.remove(os.path.join(output_dir, f))
-
-    return None
-
-
-def download_video(url: str, output_dir: str, cookies_path: str | None = None,
-                   status_callback=None) -> str:
-    """영상 다운로드. 여러 전략을 순차적으로 시도."""
-    import subprocess
-    import sys
-
-    def log(msg):
-        if status_callback:
-            status_callback(msg)
-
-    # 1단계: yt-dlp 최신 버전 + ffmpeg 설치
-    log("yt-dlp 업데이트 중...")
-    subprocess.run(
-        [sys.executable, "-m", "pip", "install", "-U", "yt-dlp"],
-        capture_output=True,
-    )
-
-    log("ffmpeg 확인 중...")
-    _install_ffmpeg()
-
-    # 2단계: yt-dlp 시도 (다양한 player_client 조합)
-    client_combos = [
-        ["--extractor-args", "youtube:player_client=mweb"],
-        ["--extractor-args", "youtube:player_client=ios"],
-        ["--extractor-args", "youtube:player_client=web_creator"],
-        ["--extractor-args", "youtube:player_client=tv"],
-        [],  # 기본값
-    ]
-
-    for i, extra in enumerate(client_combos):
-        client_name = extra[1].split("=")[1] if extra else "default"
-        log(f"yt-dlp 시도 {i + 1}/{len(client_combos)} (client: {client_name})...")
-
-        result = _run_ytdlp(url, output_dir, cookies_path, extra)
-        if result:
-            return result
-
-    # 3단계: pytubefix 폴백
-    log("pytubefix로 폴백 시도 중...")
-    subprocess.run(
-        [sys.executable, "-m", "pip", "install", "-U", "pytubefix"],
-        capture_output=True,
-    )
-
-    try:
-        from pytubefix import YouTube as PyTube
-
-        yt = PyTube(url)
-
-        # 쿠키 적용
-        if cookies_path:
-            try:
-                import http.cookiejar
-                cj = http.cookiejar.MozillaCookieJar(cookies_path)
-                cj.load(ignore_discard=True, ignore_expires=True)
-                for cookie in cj:
-                    yt._monostate.http.cookies.set(
-                        cookie.name, cookie.value, domain=cookie.domain
-                    )
-            except Exception:
-                pass
-
-        stream = (
-            yt.streams.filter(progressive=True, file_extension="mp4")
-            .order_by("resolution").desc().first()
-        )
-        if not stream:
-            stream = yt.streams.filter(progressive=True).first()
-        if not stream:
-            stream = yt.streams.first()
-        if stream:
-            return stream.download(output_path=output_dir, filename="video.mp4")
-    except Exception as e:
-        log(f"pytubefix 실패: {e}")
-
-    raise RuntimeError(
-        "모든 다운로드 방법이 실패했습니다.\n\n"
-        "해결 방법:\n"
-        "1. yt-dlp를 터미널에서 직접 업데이트: pip install -U yt-dlp\n"
-        "2. 사이드바에서 cookies.txt 업로드\n"
-        "3. 터미널에서 확인: yt-dlp --list-formats <URL>"
-    )
-
-
 def extract_frames(video_path: str, interval: float) -> list[tuple[np.ndarray, float]]:
     """interval(초) 간격으로 프레임 추출. (frame, timestamp) 리스트 반환."""
     cap = cv2.VideoCapture(video_path)
@@ -406,9 +257,13 @@ def create_individual_pdf(images: list[Image.Image]) -> bytes:
 # 사이드바
 # ──────────────────────────────────────────────
 st.sidebar.title("🎵 악보 추출기")
-st.sidebar.markdown("YouTube 합창 악보 영상에서 악보를 추출합니다.")
+st.sidebar.markdown("악보 영상을 업로드하면 악보 프레임을 자동 추출합니다.")
 
-youtube_url = st.sidebar.text_input("YouTube URL", placeholder="https://www.youtube.com/watch?v=...")
+uploaded_video = st.sidebar.file_uploader(
+    "영상 파일 업로드",
+    type=["mp4", "avi", "mov", "mkv", "webm"],
+    help="악보가 포함된 영상 파일을 업로드하세요.",
+)
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("추출 설정")
@@ -423,62 +278,28 @@ hash_threshold = st.sidebar.slider(
     "중복 제거 임계값 (해밍 거리)", min_value=1, max_value=25, value=10, step=1
 )
 
-st.sidebar.markdown("---")
-st.sidebar.subheader("쿠키 설정 (선택)")
-st.sidebar.caption(
-    "403 오류 발생 시, 브라우저에서 쿠키를 내보내 업로드하세요. "
-    "[Get cookies.txt LOCALLY](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc) "
-    "확장 프로그램 사용을 권장합니다."
-)
-cookies_file = st.sidebar.file_uploader("cookies.txt 업로드", type=["txt"])
-
 extract_btn = st.sidebar.button("🎼 악보 추출 시작", use_container_width=True)
 
 # ──────────────────────────────────────────────
 # 메인 영역
 # ──────────────────────────────────────────────
-st.title("YouTube 합창 악보 추출기")
-st.caption("YouTube 합창 악보 영상 → 악보 프레임 추출 → 크롭 → PDF/PNG 내보내기")
+st.title("합창 악보 추출기")
+st.caption("악보 영상 업로드 → 악보 프레임 추출 → 크롭 → PDF/PNG 내보내기")
 
 # ── 추출 로직 ──
 if extract_btn:
-    if not youtube_url:
-        st.error("YouTube URL을 입력해주세요.")
+    if uploaded_video is None:
+        st.error("사이드바에서 영상 파일을 업로드해주세요.")
     else:
         tmp_dir = tempfile.mkdtemp()
         try:
-            # 1) 다운로드
-            with st.status("영상 다운로드 중...", expanded=True) as status:
-                status_placeholder = st.empty()
-
-                def on_status(msg):
-                    status_placeholder.write(msg)
-
-                # 쿠키 파일 처리
-                cookie_path = None
-                if cookies_file is not None:
-                    cookie_path = os.path.join(tmp_dir, "cookies.txt")
-                    with open(cookie_path, "wb") as cf:
-                        cf.write(cookies_file.getvalue())
-                try:
-                    video_path = download_video(
-                        youtube_url, tmp_dir, cookie_path,
-                        status_callback=on_status,
-                    )
-                    st.write("✅ 다운로드 완료!")
-                except Exception as e:
-                    err_msg = str(e)
-                    st.error(f"다운로드 실패: {err_msg}")
-                    if "403" in err_msg or "Forbidden" in err_msg:
-                        st.warning(
-                            "**YouTube 403 오류 해결 방법:**\n"
-                            "1. 사이드바에서 `cookies.txt` 파일을 업로드해주세요.\n"
-                            "2. Chrome 확장 프로그램 'Get cookies.txt LOCALLY'로 "
-                            "YouTube 쿠키를 내보낼 수 있습니다.\n"
-                            "3. YouTube에 로그인된 상태에서 쿠키를 내보내면 더 잘 작동합니다."
-                        )
-                    status.update(label="다운로드 실패", state="error")
-                    st.stop()
+            with st.status("악보 추출 중...", expanded=True) as status:
+                # 1) 업로드된 영상을 임시 파일로 저장
+                st.write("영상 파일을 준비하고 있습니다...")
+                video_ext = os.path.splitext(uploaded_video.name)[1] or ".mp4"
+                video_path = os.path.join(tmp_dir, f"video{video_ext}")
+                with open(video_path, "wb") as vf:
+                    vf.write(uploaded_video.getvalue())
 
                 # 2) 프레임 추출
                 st.write("프레임을 추출하고 있습니다...")
@@ -527,6 +348,7 @@ if extract_btn:
             st.session_state.individual_crops = {}
 
         finally:
+            import shutil
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
 # ── 결과 표시 ──
